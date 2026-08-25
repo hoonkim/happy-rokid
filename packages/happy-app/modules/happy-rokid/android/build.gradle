@@ -1,0 +1,30 @@
+plugins {
+  id 'com.android.library'
+  id 'expo-module-gradle-plugin'
+}
+
+group = 'com.hoonkim.happy.rokid'
+version = '0.1.0'
+
+repositories {
+  maven { url 'https://maven.rokid.com/repository/maven-public/' }
+}
+
+android {
+  namespace 'com.hoonkim.happy.rokid'
+
+  defaultConfig {
+    versionCode 1
+    versionName '0.1.0'
+  }
+
+  lintOptions {
+    abortOnError false
+  }
+}
+
+dependencies {
+  implementation('com.rokid.security:phone.sdk:2.2.0-E') {
+    exclude group: 'org.slf4j'
+  }
+}

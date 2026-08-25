@@ -250,6 +250,17 @@ export const SettingsView = React.memo(function SettingsView() {
                 </ItemGroup>
             )}
 
+            {Platform.OS === 'android' && (
+                <ItemGroup>
+                    <Item
+                        title="Rokid Glasses"
+                        subtitle="Pair Glass3 and relay Codex status and approvals"
+                        icon={<Ionicons name="glasses-outline" size={29} color="#007AFF" />}
+                        onPress={() => router.push('/settings/rokid')}
+                    />
+                </ItemGroup>
+            )}
+
             {/* Support Us */}
             <ItemGroup>
                 <Item
