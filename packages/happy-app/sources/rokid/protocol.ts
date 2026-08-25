@@ -4,7 +4,7 @@ import type { Message } from '@/sync/typesMessage';
 export const ROKID_PROTOCOL_VERSION = 2 as const;
 export const ROKID_APPROVAL_TTL_MS = 10 * 60 * 1000;
 export const ROKID_MAX_APPROVALS = 5;
-export const ROKID_MAX_VISIBLE_SESSIONS = 3;
+export const ROKID_MAX_VISIBLE_SESSIONS = 8;
 
 export type RokidSessionStatus = 'offline' | 'ready' | 'working' | 'permission_required';
 export type RokidDecision = 'approve' | 'deny';

@@ -78,8 +78,8 @@ describe('Rokid protocol', () => {
         expect(selectPrimaryHappySession({ viewed, permission }, viewed.id, null)?.id).toBe('viewed');
     });
 
-    it('shows at most three session rows while reporting every active session', () => {
-        const sessions = Object.fromEntries(Array.from({ length: 5 }, (_, index) => {
+    it('shows up to eight session rows while reporting every active session', () => {
+        const sessions = Object.fromEntries(Array.from({ length: 10 }, (_, index) => {
             const session = makeSession({
                 id: `session-${index}`,
                 updatedAt: index,
@@ -95,9 +95,9 @@ describe('Rokid protocol', () => {
             20,
         );
 
-        expect(snapshot.sessions).toHaveLength(3);
-        expect(snapshot.sessionCount).toBe(5);
-        expect(snapshot.activeSessionCount).toBe(5);
+        expect(snapshot.sessions).toHaveLength(8);
+        expect(snapshot.sessionCount).toBe(10);
+        expect(snapshot.activeSessionCount).toBe(10);
     });
 
     it('includes the primary session latest response while preserving line breaks', () => {

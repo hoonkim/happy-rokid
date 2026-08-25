@@ -29,7 +29,17 @@ class HappyRokidModule : Module() {
     private var openScheduled = false
     private var openAttempts = 0
     private var latestSnapshot = DisplaySnapshot.offline()
+    private var answerPageIndex = 0
     private val mainHandler = Handler(Looper.getMainLooper())
+    private val answerPageRunnable = object : Runnable {
+        override fun run() {
+            val activeLink = link ?: return
+            if (!viewOpen || latestSnapshot.actionPages.size <= 1) return
+            answerPageIndex = (answerPageIndex + 1) % latestSnapshot.actionPages.size
+            activeLink.customViewUpdate(renderUpdate(latestSnapshot))
+            mainHandler.postDelayed(this, ANSWER_PAGE_INTERVAL_MS)
+        }
+    }
 
     override fun definition() = ModuleDefinition {
         Name("HappyRokid")
@@ -96,6 +106,9 @@ class HappyRokidModule : Module() {
         Function("send") { message: String ->
             if (message.length > MAX_MESSAGE_LENGTH) return@Function false
             val parsed = DisplaySnapshot.parse(message) ?: return@Function false
+            if (parsed.actionPages != latestSnapshot.actionPages) {
+                answerPageIndex = 0
+            }
             latestSnapshot = parsed
 
             val activeLink = link ?: return@Function false
@@ -103,6 +116,8 @@ class HappyRokidModule : Module() {
             val accepted = activeLink.customViewUpdate(renderUpdate(parsed))
             if (!accepted) {
                 emitState("error", "안경 화면 갱신 요청을 보내지 못했습니다")
+            } else {
+                scheduleAnswerPagination()
             }
             accepted
         }
@@ -328,10 +343,12 @@ class HappyRokidModule : Module() {
         if (link !== target) return
         viewOpen = true
         openAttempts = 0
+        scheduleAnswerPagination()
         emitState("connected", "Rokid Glasses에 Happy 세션을 표시하고 있습니다")
     }
 
     private fun resetConnectionState() {
+        stopAnswerPagination()
         linkConnected = false
         glassesConnected = false
         viewOpen = false
@@ -349,11 +366,10 @@ class HappyRokidModule : Module() {
 
     private fun renderFull(snapshot: DisplaySnapshot): String {
         val children = JSONArray()
-            .put(textNode("status", snapshot.statusLine, "18sp", bold = true, marginTop = null))
-            .put(textNode("title", snapshot.title, "16sp", bold = true, marginTop = "14dp"))
-            .put(textNode("detail", snapshot.detail, "13sp", bold = false, marginTop = "14dp"))
-            .put(textNode("action", snapshot.action, "12sp", bold = false, marginTop = "18dp"))
-            .put(textNode("footer", "Happy · Hi Rokid CXR-L", "10sp", bold = false, marginTop = "18dp"))
+            .put(textNode("status", snapshot.statusLine, "16sp", bold = true, marginTop = null))
+            .put(textNode("title", snapshot.title, "11sp", bold = false, marginTop = "8dp"))
+            .put(textNode("detail", snapshot.detailAt(answerPageIndex), "12sp", bold = false, marginTop = "10dp"))
+            .put(textNode("action", snapshot.actionAt(answerPageIndex), "11sp", bold = false, marginTop = "12dp"))
 
         return JSONObject()
             .put("type", "LinearLayout")
@@ -366,10 +382,10 @@ class HappyRokidModule : Module() {
                     .put("orientation", "vertical")
                     .put("gravity", "start")
                     .put("backgroundColor", "#FF000000")
-                    .put("paddingStart", "22dp")
-                    .put("paddingEnd", "22dp")
-                    .put("paddingTop", "72dp")
-                    .put("paddingBottom", "20dp"),
+                    .put("paddingStart", "18dp")
+                    .put("paddingEnd", "18dp")
+                    .put("paddingTop", "44dp")
+                    .put("paddingBottom", "12dp"),
             )
             .put("children", children)
             .toString()
@@ -379,9 +395,20 @@ class HappyRokidModule : Module() {
         return JSONArray()
             .put(updateNode("status", snapshot.statusLine))
             .put(updateNode("title", snapshot.title))
-            .put(updateNode("detail", snapshot.detail))
-            .put(updateNode("action", snapshot.action))
+            .put(updateNode("detail", snapshot.detailAt(answerPageIndex)))
+            .put(updateNode("action", snapshot.actionAt(answerPageIndex)))
             .toString()
+    }
+
+    private fun scheduleAnswerPagination() {
+        stopAnswerPagination()
+        if (viewOpen && latestSnapshot.actionPages.size > 1) {
+            mainHandler.postDelayed(answerPageRunnable, ANSWER_PAGE_INTERVAL_MS)
+        }
+    }
+
+    private fun stopAnswerPagination() {
+        mainHandler.removeCallbacks(answerPageRunnable)
     }
 
     private fun textNode(
@@ -432,14 +459,24 @@ class HappyRokidModule : Module() {
         val statusLine: String,
         val title: String,
         val detail: String,
-        val action: String,
+        val actionPages: List<String>,
+        val pinned: Boolean,
     ) {
+        private fun pageAt(index: Int): String = actionPages.getOrElse(index) {
+            actionPages.firstOrNull().orEmpty()
+        }
+
+        fun detailAt(index: Int): String = if (pinned) pageAt(index) else detail
+
+        fun actionAt(index: Int): String = if (pinned) "" else pageAt(index)
+
         companion object {
             fun offline() = DisplaySnapshot(
                 statusLine = "HAPPY · 오프라인",
-                title = "Happy 세션 없음",
+                title = "●작업  ○대기  !승인  ×오프라인",
                 detail = "연결된 Happy 작업을 기다리고 있습니다.",
-                action = "휴대전화의 Happy 앱을 확인하세요.",
+                actionPages = listOf(""),
+                pinned = false,
             )
 
             fun parse(raw: String): DisplaySnapshot? {
@@ -460,52 +497,65 @@ class HappyRokidModule : Module() {
                     val approvalCount = root.optInt("approvalCount", 0)
                     val sessions = root.optJSONArray("sessions") ?: JSONArray()
                     val approvals = root.optJSONArray("approvals") ?: JSONArray()
-                    val approval = approvals.optJSONObject(0)
-
-                    val statusLine = when {
-                        approvalCount > 0 -> "HAPPY · 승인 필요 $approvalCount"
-                        activeSessionCount > 0 -> "HAPPY · 실행 중 $activeSessionCount"
-                        else -> "HAPPY · 오프라인"
+                    val approval = if (pinned) {
+                        approvalForSession(approvals, session.optString("id"))
+                    } else {
+                        approvals.optJSONObject(0)
                     }
-                    val titleLine = buildString {
-                        append(agent)
-                        append(" · ")
-                        append(title)
-                        if (pinned) append(" · 고정")
-                    }.boundedSingleLine(105)
+
+                    val statusLine = if (pinned) {
+                        "${statusMarker(status)} $agent · $title"
+                    } else {
+                        "HAPPY · ${sessionCount}개 · 실행 $activeSessionCount · 승인 $approvalCount"
+                    }
+                    val titleLine = if (pinned) "" else "●작업  ○대기  !승인  ×오프라인"
                     val rows = mutableListOf<String>()
-                    for (index in 0 until minOf(sessions.length(), 3)) {
+                    for (index in 0 until minOf(sessions.length(), 8)) {
                         val item = sessions.optJSONObject(index) ?: continue
                         val itemStatus = item.optString("status", "offline")
-                        val itemAgent = item.optString("agent", "Happy").boundedSingleLine(18)
-                        val itemTitle = item.optString("title", "Happy 세션").boundedSingleLine(44)
-                        rows += "${statusMarker(itemStatus)} $itemAgent · $itemTitle · ${statusLabel(itemStatus)}"
+                        val itemAgent = item.optString("agent", "Happy").boundedSingleLine(12)
+                        val itemTitle = item.optString("title", "Happy 세션").boundedSingleLine(28)
+                        rows += "${statusMarker(itemStatus)} $itemAgent · $itemTitle"
                     }
                     val hiddenCount = (sessionCount - rows.size).coerceAtLeast(0)
                     if (hiddenCount > 0) rows += "외 ${hiddenCount}개 세션"
-                    val detail = if (rows.isEmpty()) {
+                    val detail = if (pinned) {
+                        ""
+                    } else if (rows.isEmpty()) {
                         "연결된 Happy 작업을 기다리고 있습니다."
                     } else {
-                        rows.joinToString("\n").boundedMultiline(260)
+                        rows.joinToString("\n").boundedMultiline(800)
                     }
-                    val action = if (approval != null) {
+                    val actionPages = if (approval != null) {
                         val approvalAgent = approval.optString("agent", "Happy").boundedSingleLine(18)
                         val approvalSession = approval.optString("sessionTitle", "Happy 세션").boundedSingleLine(46)
                         val tool = approval.optString("tool", "권한 요청").boundedSingleLine(42)
                         val summary = approval.optString("summary", "내용을 확인하세요").boundedSingleLine(120)
-                        "$approvalAgent · $approvalSession\n$tool · $summary\n휴대전화에서 승인 또는 거부하세요."
-                            .boundedMultiline(230)
-                    } else if (status == "ready" && latestResponse.isNotBlank()) {
-                        "최신 답변\n$latestResponse".boundedMultiline(560)
-                    } else {
-                        when (status) {
-                            "working" -> "대표 세션이 작업을 진행하고 있습니다."
-                            "ready" -> "대표 세션이 새 요청을 기다리고 있습니다."
-                            "permission_required" -> "휴대전화에서 권한 요청을 확인하세요."
-                            else -> "대표 세션이 오프라인입니다."
+                        listOf(
+                            "$approvalAgent · $approvalSession\n$tool · $summary\n휴대전화에서 승인 또는 거부하세요."
+                                .boundedMultiline(230),
+                        )
+                    } else if (pinned && latestResponse.isNotBlank()) {
+                        val responsePages = latestResponse.paginate(ANSWER_PAGE_CHARACTER_LIMIT)
+                        responsePages.mapIndexed { index, page ->
+                            val label = if (responsePages.size > 1) {
+                                "최신 답변 ${index + 1}/${responsePages.size}"
+                            } else {
+                                "최신 답변"
+                            }
+                            "$label\n$page"
                         }
+                    } else if (pinned) {
+                        listOf(when (status) {
+                            "working" -> "작업 중\n답변을 작성하고 있습니다."
+                            "ready" -> "최신 답변\n아직 표시할 답변이 없습니다."
+                            "permission_required" -> "승인 필요\n휴대전화에서 권한 요청을 확인하세요."
+                            else -> "오프라인\n마지막 답변을 불러오지 못했습니다."
+                        })
+                    } else {
+                        listOf("")
                     }
-                    DisplaySnapshot(statusLine, titleLine, detail, action)
+                    DisplaySnapshot(statusLine, titleLine, detail, actionPages, pinned)
                 } catch (_: Exception) {
                     null
                 }
@@ -518,11 +568,12 @@ class HappyRokidModule : Module() {
                 else -> "×"
             }
 
-            private fun statusLabel(status: String): String = when (status) {
-                "permission_required" -> "승인 필요"
-                "working" -> "작업 중"
-                "ready" -> "대기"
-                else -> "오프라인"
+            private fun approvalForSession(approvals: JSONArray, sessionId: String): JSONObject? {
+                for (index in 0 until approvals.length()) {
+                    val approval = approvals.optJSONObject(index) ?: continue
+                    if (approval.optString("sessionId") == sessionId) return approval
+                }
+                return null
             }
 
             private fun String.boundedSingleLine(limit: Int): String {
@@ -541,6 +592,30 @@ class HappyRokidModule : Module() {
                     .joinToString("\n")
                 return if (compact.length <= limit) compact else compact.take(limit - 1) + "…"
             }
+
+            private fun String.paginate(limit: Int): List<String> {
+                val value = trim()
+                if (value.isEmpty()) return emptyList()
+                val pages = mutableListOf<String>()
+                var start = 0
+                while (start < value.length) {
+                    var end = minOf(start + limit, value.length)
+                    if (end < value.length) {
+                        val minimumBreak = start + limit / 2
+                        for (index in end - 1 downTo minimumBreak) {
+                            val character = value[index]
+                            if (character.isWhitespace() || character in ".!?。！？") {
+                                end = index + 1
+                                break
+                            }
+                        }
+                    }
+                    value.substring(start, end).trim().takeIf { it.isNotEmpty() }?.let(pages::add)
+                    start = end
+                    while (start < value.length && value[start].isWhitespace()) start += 1
+                }
+                return pages.ifEmpty { listOf(value) }
+            }
         }
     }
 
@@ -549,6 +624,8 @@ class HappyRokidModule : Module() {
         private const val PREF_AUTHORIZED = "authorization_confirmed"
         private const val PREF_TOKEN = "authorization_token"
         private const val MAX_MESSAGE_LENGTH = 16_384
+        private const val ANSWER_PAGE_CHARACTER_LIMIT = 180
+        private const val ANSWER_PAGE_INTERVAL_MS = 12_000L
         private const val MAX_VIEW_OPEN_ATTEMPTS = 2
         private const val VIEW_OPEN_DELAY_MS = 600L
         private const val VIEW_OPEN_VERIFY_DELAY_MS = 1_200L
