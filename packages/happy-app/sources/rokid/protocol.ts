@@ -1,13 +1,17 @@
 import type { Session } from '@/sync/storageTypes';
 
-export const ROKID_PROTOCOL_VERSION = 1 as const;
+export const ROKID_PROTOCOL_VERSION = 2 as const;
 export const ROKID_APPROVAL_TTL_MS = 10 * 60 * 1000;
 export const ROKID_MAX_APPROVALS = 5;
+export const ROKID_MAX_VISIBLE_SESSIONS = 3;
 
 export type RokidSessionStatus = 'offline' | 'ready' | 'working' | 'permission_required';
 export type RokidDecision = 'approve' | 'deny';
 
 export interface RokidApproval {
+    sessionId: string;
+    sessionTitle: string;
+    agent: string;
     requestId: string;
     nonce: string;
     tool: string;
@@ -17,16 +21,24 @@ export interface RokidApproval {
     actions: readonly RokidDecision[];
 }
 
+export interface RokidSessionSummary {
+    id: string;
+    title: string;
+    agent: string;
+    status: RokidSessionStatus;
+    updatedAt: number;
+    pinned: boolean;
+}
+
 export interface RokidSessionSnapshot {
     v: typeof ROKID_PROTOCOL_VERSION;
     type: 'session_state';
     sentAt: number;
-    session: {
-        id: string;
-        title: string;
-        status: RokidSessionStatus;
-        updatedAt: number;
-    };
+    session: RokidSessionSummary;
+    sessions: RokidSessionSummary[];
+    sessionCount: number;
+    activeSessionCount: number;
+    approvalCount: number;
     approvals: RokidApproval[];
 }
 
@@ -83,7 +95,7 @@ export class ApprovalNonceRegistry {
     }
 
     validate(message: RokidDecisionMessage, session: Session | undefined, now: number): string | null {
-        if (!session || session.metadata?.flavor !== 'codex') return 'Codex session not found';
+        if (!session) return 'Happy session not found';
         const request = session.agentState?.requests?.[message.requestId];
         if (!request) return 'Permission request is no longer pending';
 
@@ -110,39 +122,55 @@ export class ApprovalNonceRegistry {
     }
 }
 
-export function selectPrimaryCodexSession(
+export function selectPrimaryHappySession(
     sessions: Record<string, Session>,
     currentViewingSessionId: string | null,
+    pinnedSessionId: string | null,
 ): Session | null {
-    const candidates = Object.values(sessions).filter((session) => session.metadata?.flavor === 'codex');
-    const viewed = currentViewingSessionId ? sessions[currentViewingSessionId] : undefined;
-    if (viewed?.metadata?.flavor === 'codex' && viewed.active) return viewed;
+    const pinned = pinnedSessionId ? sessions[pinnedSessionId] : undefined;
+    if (pinned && !isArchived(pinned)) return pinned;
 
-    return candidates.sort((left, right) => {
-        const leftPermission = pendingRequestCount(left) > 0 ? 1 : 0;
-        const rightPermission = pendingRequestCount(right) > 0 ? 1 : 0;
-        if (leftPermission !== rightPermission) return rightPermission - leftPermission;
-        if (left.thinking !== right.thinking) return Number(right.thinking) - Number(left.thinking);
-        if (left.active !== right.active) return Number(right.active) - Number(left.active);
-        return right.activeAt - left.activeAt;
-    })[0] ?? null;
+    const viewed = currentViewingSessionId ? sessions[currentViewingSessionId] : undefined;
+    if (viewed && !isArchived(viewed)) return viewed;
+
+    const candidates = Object.values(sessions).filter(isDashboardRelevant);
+
+    return candidates.sort(compareSessionPriority)[0] ?? null;
 }
 
-export function buildSessionSnapshot(
-    session: Session,
+export function buildHappySessionSnapshot(
+    sessions: Record<string, Session>,
+    currentViewingSessionId: string | null,
+    pinnedSessionId: string | null,
     registry: ApprovalNonceRegistry,
     now: number,
 ): RokidSessionSnapshot {
+    const primary = selectPrimaryHappySession(sessions, currentViewingSessionId, pinnedSessionId);
+    if (!primary) {
+        registry.prune(new Set(), now);
+        return buildOfflineSessionSnapshot(now);
+    }
+
+    const dashboardSessions = orderDashboardSessions(Object.values(sessions), primary);
     const activeKeys = new Set<string>();
-    const approvals = Object.entries(session.agentState?.requests ?? {})
-        .sort(([, left], [, right]) => (left.createdAt ?? 0) - (right.createdAt ?? 0))
-        .slice(0, ROKID_MAX_APPROVALS)
-        .flatMap(([requestId, request]) => {
+    const approvalCandidates = dashboardSessions.flatMap((session) => (
+        Object.entries(session.agentState?.requests ?? {}).map(([requestId, request]) => ({
+            session,
+            requestId,
+            request,
+        }))
+    ));
+    const pendingApprovals = approvalCandidates
+        .sort((left, right) => (left.request.createdAt ?? 0) - (right.request.createdAt ?? 0))
+        .flatMap(({ session, requestId, request }) => {
             const createdAt = request.createdAt ?? now;
             activeKeys.add(approvalKey(session.id, requestId));
             const entry = registry.getOrCreate(session.id, requestId, createdAt, now);
             if (entry.consumed) return [];
             return [{
+                sessionId: session.id,
+                sessionTitle: sessionTitle(session),
+                agent: sessionAgent(session),
                 requestId,
                 nonce: entry.nonce,
                 tool: sanitizeText(request.tool, 80),
@@ -153,19 +181,33 @@ export function buildSessionSnapshot(
             }];
         });
     registry.prune(activeKeys, now);
+    const approvals = pendingApprovals.slice(0, ROKID_MAX_APPROVALS);
+
+    const summaries = dashboardSessions
+        .slice(0, ROKID_MAX_VISIBLE_SESSIONS)
+        .map((session) => buildSessionSummary(session, session.id === pinnedSessionId));
 
     return {
         v: ROKID_PROTOCOL_VERSION,
         type: 'session_state',
         sentAt: now,
-        session: {
-            id: session.id,
-            title: sessionTitle(session),
-            status: sessionStatus(session, approvals.length),
-            updatedAt: Math.max(session.updatedAt, session.thinkingAt, session.activeAt),
-        },
+        session: buildSessionSummary(primary, primary.id === pinnedSessionId),
+        sessions: summaries,
+        sessionCount: dashboardSessions.length,
+        activeSessionCount: dashboardSessions.filter((session) => (
+            session.active && session.presence === 'online'
+        )).length,
+        approvalCount: pendingApprovals.length,
         approvals,
     };
+}
+
+export function buildSessionSnapshot(
+    session: Session,
+    registry: ApprovalNonceRegistry,
+    now: number,
+): RokidSessionSnapshot {
+    return buildHappySessionSnapshot({ [session.id]: session }, session.id, null, registry, now);
 }
 
 export function buildOfflineSessionSnapshot(now: number): RokidSessionSnapshot {
@@ -175,10 +217,16 @@ export function buildOfflineSessionSnapshot(now: number): RokidSessionSnapshot {
         sentAt: now,
         session: {
             id: 'none',
-            title: 'Codex 세션 없음',
+            title: 'Happy 세션 없음',
+            agent: 'Happy',
             status: 'offline',
             updatedAt: now,
+            pinned: false,
         },
+        sessions: [],
+        sessionCount: 0,
+        activeSessionCount: 0,
+        approvalCount: 0,
         approvals: [],
     };
 }
@@ -250,7 +298,27 @@ function sessionTitle(session: Session): string {
     const summary = session.metadata?.summary?.text?.trim();
     if (summary) return sanitizeText(summary, 80);
     const path = session.metadata?.path?.replace(/\\/g, '/').replace(/\/$/, '');
-    return sanitizeText(path?.split('/').pop() || 'Codex', 80);
+    return sanitizeText(path?.split('/').pop() || 'Happy 세션', 80);
+}
+
+function sessionAgent(session: Session): string {
+    const flavor = session.metadata?.flavor?.toLowerCase();
+    if (flavor === 'claude') return 'Claude';
+    if (flavor === 'codex' || flavor === 'openai' || flavor === 'gpt') return 'Codex';
+    if (flavor === 'gemini') return 'Gemini';
+    if (flavor === 'openclaw') return 'OpenClaw';
+    return sanitizeText(session.metadata?.flavor || 'Happy', 24);
+}
+
+function buildSessionSummary(session: Session, pinned: boolean): RokidSessionSummary {
+    return {
+        id: session.id,
+        title: sessionTitle(session),
+        agent: sessionAgent(session),
+        status: sessionStatus(session, pendingRequestCount(session)),
+        updatedAt: Math.max(session.updatedAt, session.thinkingAt, session.activeAt),
+        pinned,
+    };
 }
 
 function sessionStatus(session: Session, approvalCount: number): RokidSessionStatus {
@@ -262,6 +330,41 @@ function sessionStatus(session: Session, approvalCount: number): RokidSessionSta
 
 function pendingRequestCount(session: Session): number {
     return Object.keys(session.agentState?.requests ?? {}).length;
+}
+
+function isArchived(session: Session): boolean {
+    return session.metadata?.lifecycleState === 'archived';
+}
+
+function isDashboardRelevant(session: Session): boolean {
+    return !isArchived(session) && (
+        session.active
+        || session.presence === 'online'
+        || pendingRequestCount(session) > 0
+    );
+}
+
+function compareSessionPriority(left: Session, right: Session): number {
+    const leftPermission = pendingRequestCount(left) > 0 ? 1 : 0;
+    const rightPermission = pendingRequestCount(right) > 0 ? 1 : 0;
+    if (leftPermission !== rightPermission) return rightPermission - leftPermission;
+    if (left.thinking !== right.thinking) return Number(right.thinking) - Number(left.thinking);
+    const leftOnline = left.active && left.presence === 'online';
+    const rightOnline = right.active && right.presence === 'online';
+    if (leftOnline !== rightOnline) return Number(rightOnline) - Number(leftOnline);
+    if (left.active !== right.active) return Number(right.active) - Number(left.active);
+    return Math.max(right.updatedAt, right.thinkingAt, right.activeAt)
+        - Math.max(left.updatedAt, left.thinkingAt, left.activeAt);
+}
+
+function orderDashboardSessions(sessions: Session[], primary: Session): Session[] {
+    return sessions
+        .filter((session) => session.id === primary.id || isDashboardRelevant(session))
+        .sort((left, right) => {
+            if (left.id === primary.id) return -1;
+            if (right.id === primary.id) return 1;
+            return compareSessionPriority(left, right);
+        });
 }
 
 function approvalKey(sessionId: string, requestId: string): string {

@@ -2,10 +2,12 @@ import { describe, expect, it } from 'vitest';
 import type { Session } from '@/sync/storageTypes';
 import {
     ApprovalNonceRegistry,
+    buildHappySessionSnapshot,
     buildOfflineSessionSnapshot,
     buildSessionSnapshot,
     parseDecisionMessage,
-    selectPrimaryCodexSession,
+    ROKID_PROTOCOL_VERSION,
+    selectPrimaryHappySession,
 } from './protocol';
 
 function makeSession(overrides: Partial<Session> = {}): Session {
@@ -28,13 +30,82 @@ function makeSession(overrides: Partial<Session> = {}): Session {
 }
 
 describe('Rokid protocol', () => {
-    it('prioritizes a Codex session waiting for permission', () => {
+    it('prioritizes a Happy session waiting for permission across agent flavors', () => {
         const working = makeSession({ id: 'working', thinking: true });
         const permission = makeSession({
             id: 'permission',
+            metadata: { path: '/work/docs', host: 'mac', flavor: 'claude' },
             agentState: { requests: { req: { tool: 'CodexBash', arguments: {}, createdAt: 10 } } },
         });
-        expect(selectPrimaryCodexSession({ working, permission }, null)?.id).toBe('permission');
+        expect(selectPrimaryHappySession({ working, permission }, null, null)?.id).toBe('permission');
+    });
+
+    it('keeps a pinned session primary while preserving other sessions in the dashboard', () => {
+        const pinned = makeSession({
+            id: 'pinned',
+            metadata: { path: '/work/pinned', host: 'mac', flavor: 'claude' },
+            thinking: false,
+        });
+        const permission = makeSession({
+            id: 'permission',
+            metadata: { path: '/work/api', host: 'mac', flavor: 'codex' },
+            agentState: { requests: { req: { tool: 'CodexBash', arguments: {}, createdAt: 10 } } },
+        });
+        const snapshot = buildHappySessionSnapshot(
+            { pinned, permission },
+            null,
+            pinned.id,
+            new ApprovalNonceRegistry(() => 'nonce'),
+            20,
+        );
+
+        expect(snapshot.session).toMatchObject({ id: 'pinned', agent: 'Claude', pinned: true });
+        expect(snapshot.sessions.map((session) => session.id)).toEqual(['pinned', 'permission']);
+        expect(snapshot.approvalCount).toBe(1);
+        expect(snapshot.approvals[0]).toMatchObject({ sessionId: 'permission', agent: 'Codex' });
+    });
+
+    it('uses the session currently open in Happy when nothing is pinned', () => {
+        const viewed = makeSession({ id: 'viewed', activeAt: 1 });
+        const permission = makeSession({
+            id: 'permission',
+            activeAt: 100,
+            agentState: { requests: { req: { tool: 'CodexBash', arguments: {}, createdAt: 10 } } },
+        });
+
+        expect(selectPrimaryHappySession({ viewed, permission }, viewed.id, null)?.id).toBe('viewed');
+    });
+
+    it('shows at most three session rows while reporting every active session', () => {
+        const sessions = Object.fromEntries(Array.from({ length: 5 }, (_, index) => {
+            const session = makeSession({
+                id: `session-${index}`,
+                updatedAt: index,
+                activeAt: index,
+            });
+            return [session.id, session];
+        }));
+        const snapshot = buildHappySessionSnapshot(
+            sessions,
+            null,
+            null,
+            new ApprovalNonceRegistry(() => 'nonce'),
+            20,
+        );
+
+        expect(snapshot.sessions).toHaveLength(3);
+        expect(snapshot.sessionCount).toBe(5);
+        expect(snapshot.activeSessionCount).toBe(5);
+    });
+
+    it('does not keep an archived session pinned', () => {
+        const archived = makeSession({
+            id: 'archived',
+            metadata: { path: '/work/old', host: 'mac', flavor: 'claude', lifecycleState: 'archived' },
+        });
+        const active = makeSession({ id: 'active' });
+
+        expect(selectPrimaryHappySession({ archived, active }, null, archived.id)?.id).toBe('active');
     });
 
     it('redacts secrets and emits one-time actions only', () => {
@@ -65,7 +136,7 @@ describe('Rokid protocol', () => {
         });
         buildSessionSnapshot(session, registry, 200);
         const message = parseDecisionMessage(JSON.stringify({
-            v: 1,
+            v: ROKID_PROTOCOL_VERSION,
             type: 'decision',
             sessionId: session.id,
             requestId: 'req',
@@ -81,7 +152,7 @@ describe('Rokid protocol', () => {
 
     it('does not accept persistent approval decisions in the wire format', () => {
         expect(parseDecisionMessage(JSON.stringify({
-            v: 1,
+            v: ROKID_PROTOCOL_VERSION,
             type: 'decision',
             sessionId: 'session-1',
             requestId: 'req',
@@ -111,7 +182,7 @@ describe('Rokid protocol', () => {
         });
         buildSessionSnapshot(session, registry, 200);
         const message = parseDecisionMessage(JSON.stringify({
-            v: 1,
+            v: ROKID_PROTOCOL_VERSION,
             type: 'decision',
             sessionId: session.id,
             requestId: 'req',
@@ -122,9 +193,11 @@ describe('Rokid protocol', () => {
         expect(registry.validate(message, session, 250)).toBe('Approval request expired');
     });
 
-    it('emits an offline snapshot when no Codex session exists', () => {
+    it('emits an offline snapshot when no Happy session exists', () => {
         const snapshot = buildOfflineSessionSnapshot(300);
-        expect(snapshot.session).toMatchObject({ id: 'none', status: 'offline' });
+        expect(snapshot.session).toMatchObject({ id: 'none', title: 'Happy 세션 없음', status: 'offline' });
+        expect(snapshot.sessionCount).toBe(0);
+        expect(snapshot.activeSessionCount).toBe(0);
         expect(snapshot.approvals).toEqual([]);
     });
 });

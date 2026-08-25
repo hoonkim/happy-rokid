@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="happy_rokid_service_description">Keeps Happy session updates connected to Rokid Glasses</string>
+</resources>

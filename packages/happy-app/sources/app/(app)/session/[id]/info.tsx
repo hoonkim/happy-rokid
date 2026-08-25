@@ -1,5 +1,5 @@
 import React, { useCallback } from 'react';
-import { View, Text, Animated } from 'react-native';
+import { View, Text, Animated, Platform } from 'react-native';
 import { useRouter, useLocalSearchParams } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { Typography } from '@/constants/Typography';
@@ -137,6 +137,9 @@ function SessionInfoContent({ session }: { session: Session }) {
         openDuplicateSheet,
         resumeSession,
         resumeSessionSubtitle,
+        isPinnedOnRokid,
+        rokidPinLabel,
+        toggleRokidPin,
     } = useSessionQuickActions(session);
 
     // Check if CLI version is outdated
@@ -348,6 +351,20 @@ function SessionInfoContent({ session }: { session: Session }) {
 
                 {/* Quick Actions */}
                 <ItemGroup title={t('sessionInfo.quickActions')}>
+                    {Platform.OS === 'android' && (
+                        <Item
+                            title={rokidPinLabel}
+                            subtitle={isPinnedOnRokid
+                                ? 'This stays as the primary session on Rokid Glasses'
+                                : 'Makes this the primary session on Rokid Glasses'}
+                            icon={<Ionicons
+                                name={isPinnedOnRokid ? 'sparkles-outline' : 'pin-outline'}
+                                size={29}
+                                color="#5856D6"
+                            />}
+                            onPress={toggleRokidPin}
+                        />
+                    )}
                     {session.metadata?.machineId && (
                         <Item
                             title={t('sessionInfo.viewMachine')}

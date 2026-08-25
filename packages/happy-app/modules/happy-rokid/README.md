@@ -9,7 +9,14 @@ through the official **Hi Rokid** app and Rokid's CXR-L SDK.
 - Opens the view through `CXRLink` only after both the Hi Rokid service and
   glasses Bluetooth link are ready, avoiding the SDK session wrapper's early
   CustomView callback race.
-- Shows the selected Codex task status and the first pending approval summary.
+- Shows up to three active Happy sessions across Codex, Claude, Gemini, and
+  other Happy agent flavors.
+- Selects the primary session by explicit Rokid pin, the session open on the
+  phone, pending approval, active work, then recent activity.
+- Surfaces approval requests from every active session while keeping the
+  approve/deny controls on the phone.
+- Runs a `connectedDevice` foreground service while enabled so Android keeps
+  the Happy sync and CXR-L binder connection alive when the phone is locked.
 - Does not require a separate APK to be installed on the glasses.
 - Requests no glasses camera or microphone permission.
 - Keeps approval and denial controls in the Happy phone app for this phase.
@@ -27,7 +34,12 @@ the display-only bridge.
 2. Pair Rokid Glasses in Hi Rokid.
 3. In Happy, open **Settings → Rokid Glasses**.
 4. Enable the bridge and approve the authorization screen opened by Hi Rokid.
-5. Happy opens a CXR-L custom view and updates it as the Codex task changes.
+5. Happy opens a CXR-L custom view and updates it as Happy sessions change.
+
+The Android notification shown while relaying is required for reliable
+screen-off operation. Force-stopping Happy, stopping its foreground service,
+turning off Bluetooth/network access, or disconnecting Hi Rokid still stops
+live updates until the app is opened again.
 
 Happy stores only an app-private boolean indicating that authorization was
 completed. It re-reads the token from Hi Rokid at startup, keeps it in memory

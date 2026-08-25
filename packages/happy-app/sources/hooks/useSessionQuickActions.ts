@@ -17,6 +17,7 @@ import { getSessionForkSource } from '@/utils/sessionFork';
 import { useRouter } from 'expo-router';
 import { useSession } from '@/sync/storage';
 import { DuplicateSheet } from '@/components/DuplicateSheet';
+import { Platform } from 'react-native';
 
 export interface SessionActionItem {
     id: string;
@@ -112,6 +113,8 @@ export function useSessionQuickActions(
     const machineId = session.metadata?.machineId ?? '';
     const machine = useMachine(machineId);
     const devModeEnabled = useLocalSetting('devModeEnabled');
+    const rokidPinnedSessionId = useLocalSetting('rokidPinnedSessionId');
+    const isPinnedOnRokid = rokidPinnedSessionId === session.id;
     const expResumeSession = useSetting('expResumeSession');
     const resumeAvailability = React.useMemo(
         () => expResumeSession ? getResumeAvailability(session, machine, sessionStatus.isConnected) : { canResume: false, canShowResume: false, subtitle: '', message: '' },
@@ -249,10 +252,27 @@ export function useSessionQuickActions(
 
     const canCopySessionMetadata = __DEV__ || devModeEnabled;
 
+    const toggleRokidPin = React.useCallback(() => {
+        storage.getState().applyLocalSettings({
+            rokidPinnedSessionId: isPinnedOnRokid ? null : session.id,
+        });
+    }, [isPinnedOnRokid, session.id]);
+
+    const rokidPinLabel = isPinnedOnRokid ? 'Use automatic Rokid selection' : 'Pin on Rokid';
+
     const actionItems = React.useMemo<SessionActionItem[]>(() => {
         const items: SessionActionItem[] = [
             { id: 'details', icon: 'information-circle-outline', label: t('profile.details'), onPress: openDetails },
         ];
+
+        if (Platform.OS === 'android') {
+            items.push({
+                id: 'rokid-pin',
+                icon: isPinnedOnRokid ? 'sparkles-outline' : 'pin-outline',
+                label: rokidPinLabel,
+                onPress: toggleRokidPin,
+            });
+        }
 
         if (resumeAvailability.canShowResume) {
             items.push({ id: 'resume', icon: 'play-circle-outline', label: t('sessionInfo.resumeSession'), onPress: resumeSession });
@@ -279,10 +299,13 @@ export function useSessionQuickActions(
         copySessionMetadataAndLogs,
         forkSource,
         forkSession,
+        isPinnedOnRokid,
         openDetails,
         openDuplicateSheet,
         resumeAvailability.canShowResume,
         resumeSession,
+        rokidPinLabel,
+        toggleRokidPin,
     ]);
 
     const showActionAlert = React.useCallback(() => {
@@ -309,11 +332,14 @@ export function useSessionQuickActions(
         copySessionMetadataAndLogs,
         forkSession,
         forking,
+        isPinnedOnRokid,
         openDetails,
         openDuplicateSheet,
         resumeSession,
         resumeSessionSubtitle: resumeAvailability.subtitle,
         resumingSession,
+        rokidPinLabel,
+        toggleRokidPin,
     };
 }
 

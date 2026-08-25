@@ -254,7 +254,7 @@ export const SettingsView = React.memo(function SettingsView() {
                 <ItemGroup>
                     <Item
                         title="Rokid Glasses"
-                        subtitle="Show Codex status through the Hi Rokid app"
+                        subtitle="Show active Happy sessions through the Hi Rokid app"
                         icon={<Ionicons name="glasses-outline" size={29} color="#007AFF" />}
                         onPress={() => router.push('/settings/rokid')}
                     />

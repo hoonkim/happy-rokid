@@ -24,7 +24,9 @@ export function SessionActionsNativeMenu({
         canShowResume,
         copySessionMetadata,
         openDetails,
+        rokidPinLabel,
         resumeSession,
+        toggleRokidPin,
     } = useSessionQuickActions(session, {
         onAfterArchive,
         onAfterDelete,
@@ -35,6 +37,9 @@ export function SessionActionsNativeMenu({
             <DropdownMenu.Items>
                 <DropdownMenuItem onClick={openDetails}>
                     <DropdownMenuItem.Text>Details</DropdownMenuItem.Text>
+                </DropdownMenuItem>
+                <DropdownMenuItem onClick={toggleRokidPin}>
+                    <DropdownMenuItem.Text>{rokidPinLabel}</DropdownMenuItem.Text>
                 </DropdownMenuItem>
                 {canArchive && (
                     <DropdownMenuItem onClick={archiveSession}>

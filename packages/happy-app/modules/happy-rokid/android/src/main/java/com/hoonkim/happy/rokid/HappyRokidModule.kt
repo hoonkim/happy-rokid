@@ -65,6 +65,7 @@ class HappyRokidModule : Module() {
                 emitState("authorization_required", "Happy를 열고 Hi Rokid 연결을 확인하세요")
                 return@Function false
             }
+            if (!startRelayService(activity.applicationContext)) return@Function false
             refreshAuthorization(activity, showPrompt = false)
         }
 
@@ -87,6 +88,7 @@ class HappyRokidModule : Module() {
 
         Function("disconnect") {
             disconnectLink()
+            appContext.reactContext?.applicationContext?.let(HappyRokidService::stop)
             emitState("disconnected", "Rokid Glasses 표시를 종료했습니다")
             true
         }
@@ -137,6 +139,7 @@ class HappyRokidModule : Module() {
 
     private fun handleAuthorizationResult(context: Context, result: AuthResult) {
         if (!result.isSuccess || result.token.isNullOrBlank()) {
+            HappyRokidService.stop(context)
             preferences(context).edit()
                 .putBoolean(PREF_AUTHORIZED, false)
                 .remove(PREF_TOKEN)
@@ -156,6 +159,7 @@ class HappyRokidModule : Module() {
             .putBoolean(PREF_AUTHORIZED, true)
             .remove(PREF_TOKEN)
             .apply()
+        if (!startRelayService(context)) return
         connect(result.token!!)
     }
 
@@ -165,7 +169,7 @@ class HappyRokidModule : Module() {
             emitState(
                 if (viewOpen) "connected" else "connecting",
                 if (viewOpen) {
-                    "Rokid Glasses에 Codex 상태를 표시하고 있습니다"
+                    "Rokid Glasses에 Happy 세션을 표시하고 있습니다"
                 } else {
                     "Hi Rokid를 통해 안경에 연결하는 중"
                 },
@@ -229,7 +233,7 @@ class HappyRokidModule : Module() {
         override fun onGlassAiAssistStart() {
             mainHandler.post {
                 if (link === target) {
-                    emitState("paused", "Rokid AI 사용 중에는 Codex 표시가 잠시 멈춥니다")
+                    emitState("paused", "Rokid AI 사용 중에는 Happy 표시가 잠시 멈춥니다")
                 }
             }
         }
@@ -324,7 +328,7 @@ class HappyRokidModule : Module() {
         if (link !== target) return
         viewOpen = true
         openAttempts = 0
-        emitState("connected", "Rokid Glasses에 Codex 상태를 표시하고 있습니다")
+        emitState("connected", "Rokid Glasses에 Happy 세션을 표시하고 있습니다")
     }
 
     private fun resetConnectionState() {
@@ -410,6 +414,16 @@ class HappyRokidModule : Module() {
     private fun preferences(context: Context) =
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
+    private fun startRelayService(context: Context): Boolean {
+        return runCatching {
+            HappyRokidService.start(context)
+            true
+        }.getOrElse {
+            emitState("error", "화면이 꺼진 동안 Rokid 중계를 유지할 수 없습니다")
+            false
+        }
+    }
+
     private fun emitState(state: String, message: String) {
         sendEvent("onRokidState", bundleOf("state" to state, "message" to message))
     }
@@ -422,56 +436,89 @@ class HappyRokidModule : Module() {
     ) {
         companion object {
             fun offline() = DisplaySnapshot(
-                statusLine = "CODEX · 오프라인",
-                title = "Codex 세션 없음",
-                detail = "연결된 Codex 작업을 기다리고 있습니다.",
+                statusLine = "HAPPY · 오프라인",
+                title = "Happy 세션 없음",
+                detail = "연결된 Happy 작업을 기다리고 있습니다.",
                 action = "휴대전화의 Happy 앱을 확인하세요.",
             )
 
             fun parse(raw: String): DisplaySnapshot? {
                 return try {
                     val root = JSONObject(raw)
-                    if (root.optInt("v") != 1 || root.optString("type") != "session_state") {
+                    if (root.optInt("v") != 2 || root.optString("type") != "session_state") {
                         return null
                     }
                     val session = root.getJSONObject("session")
-                    val title = session.optString("title", "Codex").bounded(90)
+                    val title = session.optString("title", "Happy 세션").bounded(72)
+                    val agent = session.optString("agent", "Happy").bounded(24)
                     val status = session.optString("status", "offline")
+                    val pinned = session.optBoolean("pinned", false)
+                    val sessionCount = root.optInt("sessionCount", 0)
+                    val activeSessionCount = root.optInt("activeSessionCount", 0)
+                    val approvalCount = root.optInt("approvalCount", 0)
+                    val sessions = root.optJSONArray("sessions") ?: JSONArray()
                     val approvals = root.optJSONArray("approvals") ?: JSONArray()
                     val approval = approvals.optJSONObject(0)
 
-                    if (approval != null) {
-                        val tool = approval.optString("tool", "권한 요청").bounded(50)
-                        val summary = approval.optString("summary", "내용을 확인하세요").bounded(180)
-                        DisplaySnapshot(
-                            statusLine = "CODEX · 승인 필요",
-                            title = title,
-                            detail = "$tool\n$summary",
-                            action = "현재는 휴대전화에서 승인 또는 거부하세요.",
-                        )
-                    } else {
-                        val statusLine = when (status) {
-                            "working" -> "CODEX · 작업 중"
-                            "ready" -> "CODEX · 대기"
-                            "permission_required" -> "CODEX · 승인 필요"
-                            else -> "CODEX · 오프라인"
-                        }
-                        val detail = when (status) {
-                            "working" -> "Codex가 작업을 진행하고 있습니다."
-                            "ready" -> "새 요청을 기다리는 중입니다."
-                            "permission_required" -> "휴대전화에서 권한 요청을 확인하세요."
-                            else -> "Codex 세션이 오프라인입니다."
-                        }
-                        DisplaySnapshot(
-                            statusLine = statusLine,
-                            title = title,
-                            detail = detail,
-                            action = "진행 상태는 자동으로 갱신됩니다.",
-                        )
+                    val statusLine = when {
+                        approvalCount > 0 -> "HAPPY · 승인 필요 $approvalCount"
+                        activeSessionCount > 0 -> "HAPPY · 실행 중 $activeSessionCount"
+                        else -> "HAPPY · 오프라인"
                     }
+                    val titleLine = buildString {
+                        append(agent)
+                        append(" · ")
+                        append(title)
+                        if (pinned) append(" · 고정")
+                    }.bounded(105)
+                    val rows = mutableListOf<String>()
+                    for (index in 0 until minOf(sessions.length(), 3)) {
+                        val item = sessions.optJSONObject(index) ?: continue
+                        val itemStatus = item.optString("status", "offline")
+                        val itemAgent = item.optString("agent", "Happy").bounded(18)
+                        val itemTitle = item.optString("title", "Happy 세션").bounded(44)
+                        rows += "${statusMarker(itemStatus)} $itemAgent · $itemTitle · ${statusLabel(itemStatus)}"
+                    }
+                    val hiddenCount = (sessionCount - rows.size).coerceAtLeast(0)
+                    if (hiddenCount > 0) rows += "외 ${hiddenCount}개 세션"
+                    val detail = if (rows.isEmpty()) {
+                        "연결된 Happy 작업을 기다리고 있습니다."
+                    } else {
+                        rows.joinToString("\n").bounded(260)
+                    }
+                    val action = if (approval != null) {
+                        val approvalAgent = approval.optString("agent", "Happy").bounded(18)
+                        val approvalSession = approval.optString("sessionTitle", "Happy 세션").bounded(46)
+                        val tool = approval.optString("tool", "권한 요청").bounded(42)
+                        val summary = approval.optString("summary", "내용을 확인하세요").bounded(120)
+                        "$approvalAgent · $approvalSession\n$tool · $summary\n휴대전화에서 승인 또는 거부하세요."
+                            .bounded(230)
+                    } else {
+                        when (status) {
+                            "working" -> "대표 세션이 작업을 진행하고 있습니다."
+                            "ready" -> "대표 세션이 새 요청을 기다리고 있습니다."
+                            "permission_required" -> "휴대전화에서 권한 요청을 확인하세요."
+                            else -> "대표 세션이 오프라인입니다."
+                        }
+                    }
+                    DisplaySnapshot(statusLine, titleLine, detail, action)
                 } catch (_: Exception) {
                     null
                 }
+            }
+
+            private fun statusMarker(status: String): String = when (status) {
+                "permission_required" -> "!"
+                "working" -> "●"
+                "ready" -> "○"
+                else -> "×"
+            }
+
+            private fun statusLabel(status: String): String = when (status) {
+                "permission_required" -> "승인 필요"
+                "working" -> "작업 중"
+                "ready" -> "대기"
+                else -> "오프라인"
             }
 
             private fun String.bounded(limit: Int): String {
@@ -487,7 +534,7 @@ class HappyRokidModule : Module() {
         private const val PREFS_NAME = "happy_rokid_cxrl"
         private const val PREF_AUTHORIZED = "authorization_confirmed"
         private const val PREF_TOKEN = "authorization_token"
-        private const val MAX_MESSAGE_LENGTH = 4096
+        private const val MAX_MESSAGE_LENGTH = 16_384
         private const val MAX_VIEW_OPEN_ATTEMPTS = 2
         private const val VIEW_OPEN_DELAY_MS = 600L
         private const val VIEW_OPEN_VERIFY_DELAY_MS = 1_200L

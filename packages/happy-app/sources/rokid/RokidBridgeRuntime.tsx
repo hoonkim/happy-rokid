@@ -4,9 +4,7 @@ import { Platform } from 'react-native';
 import { nativeRokidBridge } from './nativeBridge';
 import {
     ApprovalNonceRegistry,
-    buildOfflineSessionSnapshot,
-    buildSessionSnapshot,
-    selectPrimaryCodexSession,
+    buildHappySessionSnapshot,
     stableSnapshotFingerprint,
 } from './protocol';
 import { storage, useLocalSetting } from '@/sync/storage';
@@ -22,12 +20,22 @@ export function RokidBridgeRuntime(): null {
 
         const publishSnapshot = () => {
             const state = storage.getState();
-            const session = selectPrimaryCodexSession(state.sessions, state.currentViewingSessionId);
+            const configuredPin = state.localSettings.rokidPinnedSessionId;
+            const pinnedSession = configuredPin ? state.sessions[configuredPin] : undefined;
+            const pinnedSessionId = pinnedSession?.metadata?.lifecycleState === 'archived'
+                ? null
+                : pinnedSession?.id ?? null;
+            if (configuredPin && !pinnedSessionId) {
+                state.applyLocalSettings({ rokidPinnedSessionId: null });
+            }
             const now = Date.now();
-            if (!session) registry.prune(new Set(), now);
-            const snapshot = session
-                ? buildSessionSnapshot(session, registry, now)
-                : buildOfflineSessionSnapshot(now);
+            const snapshot = buildHappySessionSnapshot(
+                state.sessions,
+                state.currentViewingSessionId,
+                pinnedSessionId,
+                registry,
+                now,
+            );
             const fingerprint = stableSnapshotFingerprint(snapshot);
             if (fingerprint === lastFingerprint) return;
             if (nativeRokidBridge.send(JSON.stringify(snapshot))) {
