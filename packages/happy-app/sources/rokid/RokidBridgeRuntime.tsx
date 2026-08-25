@@ -6,18 +6,13 @@ import {
     ApprovalNonceRegistry,
     buildOfflineSessionSnapshot,
     buildSessionSnapshot,
-    parseDecisionMessage,
-    ROKID_PROTOCOL_VERSION,
     selectPrimaryCodexSession,
     stableSnapshotFingerprint,
-    type RokidDecisionAck,
 } from './protocol';
 import { storage, useLocalSetting } from '@/sync/storage';
-import { sessionAllow, sessionDeny } from '@/sync/ops';
 
 export function RokidBridgeRuntime(): null {
     const enabled = useLocalSetting('rokidBridgeEnabled');
-    const deviceAddress = useLocalSetting('rokidDeviceAddress');
 
     React.useEffect(() => {
         if (Platform.OS !== 'android' || !enabled) return;
@@ -48,91 +43,14 @@ export function RokidBridgeRuntime(): null {
                 publishSnapshot();
             }
         });
-        const unsubscribeMessages = nativeRokidBridge.subscribeMessages(({ message }) => {
-            void handleDecision(message, registry).then((ack) => {
-                nativeRokidBridge.send(JSON.stringify(ack));
-                lastFingerprint = null;
-                publishSnapshot();
-            });
-        });
-
-        void hasBluetoothPermission().then((granted) => {
-            if (granted) nativeRokidBridge.initialize(deviceAddress);
-        });
+        nativeRokidBridge.initialize();
 
         return () => {
-            unsubscribeMessages();
             unsubscribeNative();
             unsubscribeStore();
             clearInterval(refreshTimer);
         };
-    }, [deviceAddress, enabled]);
+    }, [enabled]);
 
     return null;
-}
-
-async function handleDecision(
-    raw: string,
-    registry: ApprovalNonceRegistry,
-): Promise<RokidDecisionAck> {
-    const now = Date.now();
-    const parsed = parseDecisionMessage(raw);
-    if (!parsed) return rejectedAck('', '', 'deny', 'Invalid decision message', now);
-
-    const session = storage.getState().sessions[parsed.sessionId];
-    const rejection = registry.validate(parsed, session, now);
-    if (rejection) {
-        return rejectedAck(parsed.sessionId, parsed.requestId, parsed.decision, rejection, now);
-    }
-
-    // Reserve the one-time response before crossing the async Happy boundary so
-    // duplicated Bluetooth messages cannot race each other.
-    registry.consume(parsed.sessionId, parsed.requestId);
-    try {
-        if (parsed.decision === 'approve') {
-            await sessionAllow(parsed.sessionId, parsed.requestId, undefined, undefined, 'approved');
-        } else {
-            await sessionDeny(parsed.sessionId, parsed.requestId, undefined, undefined, 'denied');
-        }
-        return {
-            v: ROKID_PROTOCOL_VERSION,
-            type: 'decision_ack',
-            sessionId: parsed.sessionId,
-            requestId: parsed.requestId,
-            decision: parsed.decision,
-            accepted: true,
-            sentAt: now,
-        };
-    } catch {
-        return rejectedAck(parsed.sessionId, parsed.requestId, parsed.decision, 'Happy rejected the decision', now);
-    }
-}
-
-function rejectedAck(
-    sessionId: string,
-    requestId: string,
-    decision: 'approve' | 'deny',
-    reason: string,
-    now: number,
-): RokidDecisionAck {
-    return {
-        v: ROKID_PROTOCOL_VERSION,
-        type: 'decision_ack',
-        sessionId,
-        requestId,
-        decision,
-        accepted: false,
-        reason,
-        sentAt: now,
-    };
-}
-
-async function hasBluetoothPermission(): Promise<boolean> {
-    if (Platform.OS !== 'android') return false;
-    const { PermissionsAndroid } = await import('react-native');
-    if (Platform.Version >= 31) {
-        return (await PermissionsAndroid.check(PermissionsAndroid.PERMISSIONS.BLUETOOTH_SCAN)) &&
-            (await PermissionsAndroid.check(PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT));
-    }
-    return PermissionsAndroid.check(PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION);
 }

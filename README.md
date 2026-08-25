@@ -14,9 +14,10 @@
 Use Claude Code or Codex from anywhere with end-to-end encryption.
 </h4>
 
-> **Rokid fork:** this branch adds an experimental Android phone bridge and a
-> thin Glass3 app for viewing Codex progress and answering one-time permission
-> requests. See [Happy for Rokid Glass3](packages/happy-rokid-glasses/README.md).
+> **Rokid fork:** this branch adds an experimental Android CXR-L bridge that
+> shows Codex progress on Rokid Glasses through the official Hi Rokid app. It
+> does not require a separate glasses APK. See
+> [Happy for Rokid Glasses](packages/happy-app/modules/happy-rokid/README.md).
 
 <div align="center">
   

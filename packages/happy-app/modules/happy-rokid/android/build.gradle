@@ -24,11 +24,5 @@ android {
 }
 
 dependencies {
-  implementation('com.rokid.security:phone.sdk:2.2.0-E') {
-    exclude group: 'org.slf4j'
-    // Happy's Expo runtime already provides the newer, API-compatible
-    // bcprov-jdk15to18 artifact. Keeping Rokid's older jdk15on copy would
-    // package the same Bouncy Castle classes twice and break the app build.
-    exclude group: 'org.bouncycastle', module: 'bcprov-jdk15on'
-  }
+  implementation 'com.rokid.cxr:client-l:1.1.1'
 }
