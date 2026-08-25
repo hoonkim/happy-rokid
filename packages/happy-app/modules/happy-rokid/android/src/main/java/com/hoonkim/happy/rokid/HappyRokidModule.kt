@@ -384,7 +384,7 @@ class HappyRokidModule : Module() {
                     .put("backgroundColor", "#FF000000")
                     .put("paddingStart", "18dp")
                     .put("paddingEnd", "18dp")
-                    .put("paddingTop", "44dp")
+                    .put("paddingTop", "72dp")
                     .put("paddingBottom", "12dp"),
             )
             .put("children", children)
