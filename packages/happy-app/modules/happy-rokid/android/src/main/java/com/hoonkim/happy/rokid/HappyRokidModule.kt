@@ -2,19 +2,18 @@ package com.hoonkim.happy.rokid
 
 import android.app.Activity
 import android.content.Context
+import android.os.Handler
+import android.os.Looper
 import androidx.core.os.bundleOf
+import com.rokid.cxr.link.CXRLink
+import com.rokid.cxr.link.callbacks.ICXRLinkCbk
+import com.rokid.cxr.link.callbacks.ICustomViewCbk
+import com.rokid.cxr.link.utils.CxrDefs
+import com.rokid.cxr.link.utils.GlassInfo
 import com.rokid.cxr.session.AuthResult
-import com.rokid.cxr.session.CloseReason
-import com.rokid.cxr.session.CxrSession
 import com.rokid.cxr.session.CxrSessionManager
-import com.rokid.cxr.session.ISessionLifecycleCbk
-import com.rokid.cxr.session.PausedReason
 import com.rokid.cxr.session.RokidAppStatus
-import com.rokid.cxr.session.SessionConfig
 import com.rokid.cxr.session.SessionErrorCode
-import com.rokid.cxr.session.SessionState
-import com.rokid.cxr.session.SessionType
-import com.rokid.cxr.session.TerminatingReason
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
 import org.json.JSONArray
@@ -22,9 +21,15 @@ import org.json.JSONObject
 
 class HappyRokidModule : Module() {
     private var manager: CxrSessionManager? = null
-    private var session: CxrSession? = null
+    private var link: CXRLink? = null
     private var authorizationPending = false
+    private var linkConnected = false
+    private var glassesConnected = false
+    private var viewOpen = false
+    private var openScheduled = false
+    private var openAttempts = 0
     private var latestSnapshot = DisplaySnapshot.offline()
+    private val mainHandler = Handler(Looper.getMainLooper())
 
     override fun definition() = ModuleDefinition {
         Name("HappyRokid")
@@ -81,8 +86,7 @@ class HappyRokidModule : Module() {
         }
 
         Function("disconnect") {
-            session?.close()
-            session = null
+            disconnectLink()
             emitState("disconnected", "Rokid Glasses 표시를 종료했습니다")
             true
         }
@@ -92,13 +96,17 @@ class HappyRokidModule : Module() {
             val parsed = DisplaySnapshot.parse(message) ?: return@Function false
             latestSnapshot = parsed
 
-            val activeSession = session ?: return@Function false
-            if (activeSession.getState() != SessionState.Started) return@Function false
-            val result = activeSession.customViewUpdate(renderUpdate(parsed))
-            if (!result.isSuccess) {
-                emitState("error", "안경 화면 갱신 실패: ${result.code.name}")
+            val activeLink = link ?: return@Function false
+            if (!viewOpen) return@Function false
+            val accepted = activeLink.customViewUpdate(renderUpdate(parsed))
+            if (!accepted) {
+                emitState("error", "안경 화면 갱신 요청을 보내지 못했습니다")
             }
-            result.isSuccess
+            accepted
+        }
+
+        OnDestroy {
+            disconnectLink()
         }
     }
 
@@ -153,12 +161,10 @@ class HappyRokidModule : Module() {
 
     private fun connect(token: String) {
         val context = appContext.reactContext?.applicationContext ?: return
-        val sessionManager = getManager(context)
-        val current = session
-        if (current != null && current.getState() != SessionState.Idle) {
+        if (link != null) {
             emitState(
-                if (current.getState() == SessionState.Started) "connected" else "connecting",
-                if (current.getState() == SessionState.Started) {
+                if (viewOpen) "connected" else "connecting",
+                if (viewOpen) {
                     "Rokid Glasses에 Codex 상태를 표시하고 있습니다"
                 } else {
                     "Hi Rokid를 통해 안경에 연결하는 중"
@@ -167,86 +173,174 @@ class HappyRokidModule : Module() {
             return
         }
 
-        // isGlassesBtConnected() can lag behind Hi Rokid's real connection
-        // state during activity transitions. Let the session handshake be the
-        // source of truth; it reports BT_NOT_CONNECTED when no data link exists.
-        val created = sessionManager.create(
-            SessionConfig(
-                sessionType = SessionType.CUSTOM_VIEW,
-                viewData = renderFull(latestSnapshot),
-            ),
+        val created = CXRLink(context)
+        val configured = created.configCXRSession(
+            CxrDefs.CXRSession(CxrDefs.CXRSessionType.CUSTOMVIEW),
         )
-        session = created
-        created.addLifecycleCallback(lifecycleCallback(context, created))
+        if (!configured) {
+            emitState("error", "Hi Rokid 화면 세션을 준비하지 못했습니다")
+            return
+        }
+
+        created.setCXRCustomViewCbk(customViewCallback(created))
+        created.setCXRLinkCbk(linkCallback(created))
+        resetConnectionState()
+        link = created
         emitState("connecting", "Hi Rokid를 통해 안경에 연결하는 중")
-        created.connect(token)
+        if (!created.connect(token)) {
+            link = null
+            resetConnectionState()
+            emitState("error", "Hi Rokid 연결 요청을 시작하지 못했습니다")
+        }
     }
 
-    private fun lifecycleCallback(context: Context, target: CxrSession) = object : ISessionLifecycleCbk {
-        override fun onSessionStarted() {
-            if (session !== target) return
-            emitState("connected", "Rokid Glasses에 Codex 상태를 표시하고 있습니다")
-        }
-
-        override fun onSessionPaused(reason: PausedReason) {
-            if (session !== target) return
-            emitState(
-                "paused",
-                if (reason == PausedReason.AI_ASSIST) {
-                    "Rokid AI 사용 중에는 Codex 표시가 잠시 멈춥니다"
+    private fun linkCallback(target: CXRLink) = object : ICXRLinkCbk {
+        override fun onCXRLConnected(connected: Boolean) {
+            mainHandler.post {
+                if (link !== target) return@post
+                linkConnected = connected
+                if (connected) {
+                    scheduleViewOpen(target)
                 } else {
-                    "안경 연결이 잠시 멈췄습니다"
-                },
-            )
-        }
-
-        override fun onSessionResumed() {
-            if (session !== target) return
-            emitState("connected", "Rokid Glasses에 Codex 상태를 표시하고 있습니다")
-            target.customViewUpdate(renderUpdate(latestSnapshot))
-        }
-
-        override fun onSessionTerminating(reason: TerminatingReason, gracePeriodMs: Long) {
-            if (session !== target) return
-            emitState("disconnected", "안경 표시 세션을 종료하는 중")
-        }
-
-        override fun onSessionClosed(reason: CloseReason) {
-            if (session !== target) return
-            session = null
-            emitState(
-                "disconnected",
-                if (reason == CloseReason.USER_CLOSED) {
-                    "Rokid Glasses 표시를 종료했습니다"
-                } else {
-                    "Rokid Glasses 연결이 종료되었습니다: ${reason.name}"
-                },
-            )
-        }
-
-        override fun onConnectResult(success: Boolean, errorCode: SessionErrorCode?) {
-            if (session !== target || success) return
-            session = null
-            val code = errorCode ?: SessionErrorCode.UNKNOWN
-            when (code) {
-                SessionErrorCode.NOT_AUTHENTICATED,
-                SessionErrorCode.TOKEN_EXPIRED -> {
-                    preferences(context).edit()
-                        .putBoolean(PREF_AUTHORIZED, false)
-                        .remove(PREF_TOKEN)
-                        .apply()
-                    emitState("authorization_required", "Hi Rokid 연결을 다시 승인하세요")
+                    viewOpen = false
+                    emitState("disconnected", "Hi Rokid 연결이 종료되었습니다")
                 }
-                SessionErrorCode.BT_NOT_CONNECTED -> {
-                    emitState("disconnected", "Hi Rokid에서 Rokid Glasses를 먼저 연결하세요")
-                }
-                SessionErrorCode.ROKID_APP_NOT_INSTALLED,
-                SessionErrorCode.ROKID_APP_VERSION_LOW -> {
-                    emitState("unavailable", "호환되는 Hi Rokid 앱이 필요합니다")
-                }
-                else -> emitState("error", "Rokid Glasses 연결 실패: ${code.name}")
             }
         }
+
+        override fun onGlassBtConnected(connected: Boolean) {
+            mainHandler.post {
+                if (link !== target) return@post
+                glassesConnected = connected
+                if (connected) {
+                    scheduleViewOpen(target)
+                } else {
+                    viewOpen = false
+                    openAttempts = 0
+                    emitState("disconnected", "Hi Rokid에서 Rokid Glasses 연결을 확인하세요")
+                }
+            }
+        }
+
+        override fun onGlassDeviceInfo(info: GlassInfo) = Unit
+
+        override fun onGlassWearingStatus(wearing: Boolean) = Unit
+
+        override fun onGlassAiAssistStart() {
+            mainHandler.post {
+                if (link === target) {
+                    emitState("paused", "Rokid AI 사용 중에는 Codex 표시가 잠시 멈춥니다")
+                }
+            }
+        }
+
+        override fun onGlassAiAssistStop() {
+            mainHandler.post {
+                if (link !== target) return@post
+                if (target.customViewIsOpen()) {
+                    markViewOpen(target)
+                    target.customViewUpdate(renderUpdate(latestSnapshot))
+                } else {
+                    viewOpen = false
+                    scheduleViewOpen(target)
+                }
+            }
+        }
+
+        override fun onGlassAiInterrupt(interrupted: Boolean) {
+            if (interrupted) onGlassAiAssistStart() else onGlassAiAssistStop()
+        }
+
+        override fun onGlassLauncherResume() {
+            mainHandler.post {
+                if (link !== target) return@post
+                if (!target.customViewIsOpen()) {
+                    viewOpen = false
+                    scheduleViewOpen(target)
+                }
+            }
+        }
+    }
+
+    private fun customViewCallback(target: CXRLink) = object : ICustomViewCbk {
+        override fun onCustomViewOpened() {
+            mainHandler.post { markViewOpen(target) }
+        }
+
+        override fun onCustomViewUpdated() = Unit
+
+        override fun onCustomViewClosed() {
+            mainHandler.post {
+                if (link === target) viewOpen = false
+            }
+        }
+
+        override fun onCustomViewIconsSent() = Unit
+
+        override fun onCustomViewError(code: Int, message: String?) {
+            mainHandler.post {
+                if (link !== target) return@post
+                viewOpen = false
+                emitState("error", "안경 화면을 열지 못했습니다 ($code)")
+            }
+        }
+    }
+
+    private fun scheduleViewOpen(target: CXRLink) {
+        if (link !== target || !linkConnected || !glassesConnected || viewOpen || openScheduled) return
+        openScheduled = true
+
+        // CXR-L announces the link and Bluetooth state while its binder callback
+        // registrations are still being completed. Deferring the open avoids
+        // losing onCustomViewOpened on Hi Rokid 1.12 / client-l 1.1.1.
+        mainHandler.postDelayed({
+            openScheduled = false
+            if (link !== target || !linkConnected || !glassesConnected || viewOpen) return@postDelayed
+            openView(target)
+        }, VIEW_OPEN_DELAY_MS)
+    }
+
+    private fun openView(target: CXRLink) {
+        if (link !== target) return
+        openAttempts += 1
+        if (!target.customViewOpen(renderFull(latestSnapshot))) {
+            emitState("error", "안경 화면 열기 요청을 보내지 못했습니다")
+            return
+        }
+
+        mainHandler.postDelayed({
+            if (link !== target || viewOpen) return@postDelayed
+            if (target.customViewIsOpen()) {
+                markViewOpen(target)
+            } else if (openAttempts < MAX_VIEW_OPEN_ATTEMPTS) {
+                scheduleViewOpen(target)
+            } else {
+                emitState("error", "안경 화면 응답이 없습니다. Hi Rokid 연결을 확인하세요")
+            }
+        }, VIEW_OPEN_VERIFY_DELAY_MS)
+    }
+
+    private fun markViewOpen(target: CXRLink) {
+        if (link !== target) return
+        viewOpen = true
+        openAttempts = 0
+        emitState("connected", "Rokid Glasses에 Codex 상태를 표시하고 있습니다")
+    }
+
+    private fun resetConnectionState() {
+        linkConnected = false
+        glassesConnected = false
+        viewOpen = false
+        openScheduled = false
+        openAttempts = 0
+    }
+
+    private fun disconnectLink() {
+        val activeLink = link
+        link = null
+        resetConnectionState()
+        runCatching { activeLink?.customViewClose() }
+        runCatching { activeLink?.disconnect() }
     }
 
     private fun renderFull(snapshot: DisplaySnapshot): String {
@@ -394,5 +488,8 @@ class HappyRokidModule : Module() {
         private const val PREF_AUTHORIZED = "authorization_confirmed"
         private const val PREF_TOKEN = "authorization_token"
         private const val MAX_MESSAGE_LENGTH = 4096
+        private const val MAX_VIEW_OPEN_ATTEMPTS = 2
+        private const val VIEW_OPEN_DELAY_MS = 600L
+        private const val VIEW_OPEN_VERIFY_DELAY_MS = 1_200L
     }
 }

@@ -6,6 +6,9 @@ through the official **Hi Rokid** app and Rokid's CXR-L SDK.
 ## Current scope
 
 - Uses `com.rokid.cxr:client-l:1.1.1` and a `CUSTOM_VIEW` session.
+- Opens the view through `CXRLink` only after both the Hi Rokid service and
+  glasses Bluetooth link are ready, avoiding the SDK session wrapper's early
+  CustomView callback race.
 - Shows the selected Codex task status and the first pending approval summary.
 - Does not require a separate APK to be installed on the glasses.
 - Requests no glasses camera or microphone permission.
