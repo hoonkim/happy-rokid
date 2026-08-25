@@ -5,6 +5,7 @@ import { nativeRokidBridge } from './nativeBridge';
 import {
     ApprovalNonceRegistry,
     buildHappySessionSnapshot,
+    latestAgentResponse,
     stableSnapshotFingerprint,
 } from './protocol';
 import { storage, useLocalSetting } from '@/sync/storage';
@@ -29,12 +30,19 @@ export function RokidBridgeRuntime(): null {
                 state.applyLocalSettings({ rokidPinnedSessionId: null });
             }
             const now = Date.now();
+            const latestResponses = Object.fromEntries(
+                Object.entries(state.sessionMessages).flatMap(([sessionId, sessionMessages]) => {
+                    const response = latestAgentResponse(sessionMessages.messages);
+                    return response ? [[sessionId, response]] : [];
+                }),
+            );
             const snapshot = buildHappySessionSnapshot(
                 state.sessions,
                 state.currentViewingSessionId,
                 pinnedSessionId,
                 registry,
                 now,
+                latestResponses,
             );
             const fingerprint = stableSnapshotFingerprint(snapshot);
             if (fingerprint === lastFingerprint) return;

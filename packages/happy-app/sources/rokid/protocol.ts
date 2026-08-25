@@ -1,4 +1,5 @@
 import type { Session } from '@/sync/storageTypes';
+import type { Message } from '@/sync/typesMessage';
 
 export const ROKID_PROTOCOL_VERSION = 2 as const;
 export const ROKID_APPROVAL_TTL_MS = 10 * 60 * 1000;
@@ -28,6 +29,7 @@ export interface RokidSessionSummary {
     status: RokidSessionStatus;
     updatedAt: number;
     pinned: boolean;
+    latestResponse?: string;
 }
 
 export interface RokidSessionSnapshot {
@@ -144,6 +146,7 @@ export function buildHappySessionSnapshot(
     pinnedSessionId: string | null,
     registry: ApprovalNonceRegistry,
     now: number,
+    latestResponses: Readonly<Record<string, string>> = {},
 ): RokidSessionSnapshot {
     const primary = selectPrimaryHappySession(sessions, currentViewingSessionId, pinnedSessionId);
     if (!primary) {
@@ -191,7 +194,11 @@ export function buildHappySessionSnapshot(
         v: ROKID_PROTOCOL_VERSION,
         type: 'session_state',
         sentAt: now,
-        session: buildSessionSummary(primary, primary.id === pinnedSessionId),
+        session: buildSessionSummary(
+            primary,
+            primary.id === pinnedSessionId,
+            latestResponses[primary.id],
+        ),
         sessions: summaries,
         sessionCount: dashboardSessions.length,
         activeSessionCount: dashboardSessions.filter((session) => (
@@ -200,6 +207,17 @@ export function buildHappySessionSnapshot(
         approvalCount: pendingApprovals.length,
         approvals,
     };
+}
+
+export function latestAgentResponse(messages: readonly Message[]): string | null {
+    const message = messages.find((candidate) => (
+        candidate.kind === 'agent-text'
+        && !candidate.isThinking
+        && candidate.text.trim().length > 0
+    ));
+    return message?.kind === 'agent-text'
+        ? sanitizeMultilineText(message.text, 520)
+        : null;
 }
 
 export function buildSessionSnapshot(
@@ -280,14 +298,33 @@ function redactUnknown(value: unknown, depth = 0): unknown {
 }
 
 function sanitizeText(value: string, maxLength: number): string {
-    const compact = value.replace(/[\r\n\t]+/g, ' ').replace(/\s+/g, ' ').trim()
+    const compact = redactSensitiveText(value)
+        .replace(/[\r\n\t]+/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+    return compact.length <= maxLength ? compact : `${compact.slice(0, maxLength)}…`;
+}
+
+function sanitizeMultilineText(value: string, maxLength: number): string {
+    const compact = redactSensitiveText(value)
+        .replace(/\r\n?/g, '\n')
+        .replace(/\t/g, ' ')
+        .split('\n')
+        .map((line) => line.replace(/[ ]+/g, ' ').trim())
+        .join('\n')
+        .replace(/\n{3,}/g, '\n\n')
+        .trim();
+    return compact.length <= maxLength ? compact : `${compact.slice(0, maxLength)}…`;
+}
+
+function redactSensitiveText(value: string): string {
+    return value
         .replace(/\bsk-[a-zA-Z0-9_-]{12,}\b/g, 'sk-[가림]')
         .replace(/bearer\s+[a-zA-Z0-9._~+/=-]{8,}/gi, 'Bearer [가림]')
         .replace(
             /(api[_-]?key|access[_-]?token|refresh[_-]?token|token|password|secret|authorization)(\s*[:=]\s*)([^\s,;]+)/gi,
             '$1$2[가림]',
         );
-    return compact.length <= maxLength ? compact : `${compact.slice(0, maxLength)}…`;
 }
 
 function isSensitiveKey(key: string): boolean {
@@ -310,7 +347,11 @@ function sessionAgent(session: Session): string {
     return sanitizeText(session.metadata?.flavor || 'Happy', 24);
 }
 
-function buildSessionSummary(session: Session, pinned: boolean): RokidSessionSummary {
+function buildSessionSummary(
+    session: Session,
+    pinned: boolean,
+    latestResponse?: string,
+): RokidSessionSummary {
     return {
         id: session.id,
         title: sessionTitle(session),
@@ -318,6 +359,7 @@ function buildSessionSummary(session: Session, pinned: boolean): RokidSessionSum
         status: sessionStatus(session, pendingRequestCount(session)),
         updatedAt: Math.max(session.updatedAt, session.thinkingAt, session.activeAt),
         pinned,
+        ...(latestResponse ? { latestResponse: sanitizeMultilineText(latestResponse, 520) } : {}),
     };
 }
 

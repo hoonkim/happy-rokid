@@ -449,8 +449,10 @@ class HappyRokidModule : Module() {
                         return null
                     }
                     val session = root.getJSONObject("session")
-                    val title = session.optString("title", "Happy 세션").bounded(72)
-                    val agent = session.optString("agent", "Happy").bounded(24)
+                    val title = session.optString("title", "Happy 세션").boundedSingleLine(72)
+                    val agent = session.optString("agent", "Happy").boundedSingleLine(24)
+                    val latestResponse = session.optString("latestResponse", "")
+                        .boundedMultiline(520)
                     val status = session.optString("status", "offline")
                     val pinned = session.optBoolean("pinned", false)
                     val sessionCount = root.optInt("sessionCount", 0)
@@ -470,13 +472,13 @@ class HappyRokidModule : Module() {
                         append(" · ")
                         append(title)
                         if (pinned) append(" · 고정")
-                    }.bounded(105)
+                    }.boundedSingleLine(105)
                     val rows = mutableListOf<String>()
                     for (index in 0 until minOf(sessions.length(), 3)) {
                         val item = sessions.optJSONObject(index) ?: continue
                         val itemStatus = item.optString("status", "offline")
-                        val itemAgent = item.optString("agent", "Happy").bounded(18)
-                        val itemTitle = item.optString("title", "Happy 세션").bounded(44)
+                        val itemAgent = item.optString("agent", "Happy").boundedSingleLine(18)
+                        val itemTitle = item.optString("title", "Happy 세션").boundedSingleLine(44)
                         rows += "${statusMarker(itemStatus)} $itemAgent · $itemTitle · ${statusLabel(itemStatus)}"
                     }
                     val hiddenCount = (sessionCount - rows.size).coerceAtLeast(0)
@@ -484,15 +486,17 @@ class HappyRokidModule : Module() {
                     val detail = if (rows.isEmpty()) {
                         "연결된 Happy 작업을 기다리고 있습니다."
                     } else {
-                        rows.joinToString("\n").bounded(260)
+                        rows.joinToString("\n").boundedMultiline(260)
                     }
                     val action = if (approval != null) {
-                        val approvalAgent = approval.optString("agent", "Happy").bounded(18)
-                        val approvalSession = approval.optString("sessionTitle", "Happy 세션").bounded(46)
-                        val tool = approval.optString("tool", "권한 요청").bounded(42)
-                        val summary = approval.optString("summary", "내용을 확인하세요").bounded(120)
+                        val approvalAgent = approval.optString("agent", "Happy").boundedSingleLine(18)
+                        val approvalSession = approval.optString("sessionTitle", "Happy 세션").boundedSingleLine(46)
+                        val tool = approval.optString("tool", "권한 요청").boundedSingleLine(42)
+                        val summary = approval.optString("summary", "내용을 확인하세요").boundedSingleLine(120)
                         "$approvalAgent · $approvalSession\n$tool · $summary\n휴대전화에서 승인 또는 거부하세요."
-                            .bounded(230)
+                            .boundedMultiline(230)
+                    } else if (status == "ready" && latestResponse.isNotBlank()) {
+                        "최신 답변\n$latestResponse".boundedMultiline(560)
                     } else {
                         when (status) {
                             "working" -> "대표 세션이 작업을 진행하고 있습니다."
@@ -521,10 +525,20 @@ class HappyRokidModule : Module() {
                 else -> "오프라인"
             }
 
-            private fun String.bounded(limit: Int): String {
+            private fun String.boundedSingleLine(limit: Int): String {
                 val compact = replace(Regex("[\\r\\n\\t]+"), " ")
                     .replace(Regex("\\s+"), " ")
                     .trim()
+                return if (compact.length <= limit) compact else compact.take(limit - 1) + "…"
+            }
+
+            private fun String.boundedMultiline(limit: Int): String {
+                val compact = replace("\r\n", "\n")
+                    .replace('\r', '\n')
+                    .split('\n')
+                    .map { line -> line.replace(Regex("[\\t ]+"), " ").trim() }
+                    .filter { line -> line.isNotEmpty() }
+                    .joinToString("\n")
                 return if (compact.length <= limit) compact else compact.take(limit - 1) + "…"
             }
         }

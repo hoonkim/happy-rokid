@@ -1,10 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import type { Session } from '@/sync/storageTypes';
+import type { Message } from '@/sync/typesMessage';
 import {
     ApprovalNonceRegistry,
     buildHappySessionSnapshot,
     buildOfflineSessionSnapshot,
     buildSessionSnapshot,
+    latestAgentResponse,
     parseDecisionMessage,
     ROKID_PROTOCOL_VERSION,
     selectPrimaryHappySession,
@@ -96,6 +98,49 @@ describe('Rokid protocol', () => {
         expect(snapshot.sessions).toHaveLength(3);
         expect(snapshot.sessionCount).toBe(5);
         expect(snapshot.activeSessionCount).toBe(5);
+    });
+
+    it('includes the primary session latest response while preserving line breaks', () => {
+        const snapshot = buildHappySessionSnapshot(
+            { primary: makeSession({ id: 'primary' }) },
+            'primary',
+            null,
+            new ApprovalNonceRegistry(() => 'nonce'),
+            20,
+            { primary: '첫 줄\n둘째 줄' },
+        );
+
+        expect(snapshot.session.latestResponse).toBe('첫 줄\n둘째 줄');
+        expect(snapshot.sessions[0].latestResponse).toBeUndefined();
+    });
+
+    it('selects the newest visible agent answer and redacts secrets', () => {
+        const messages: Message[] = [
+            {
+                kind: 'agent-text',
+                id: 'thinking',
+                localId: null,
+                createdAt: 3,
+                text: '분석 중',
+                isThinking: true,
+            },
+            {
+                kind: 'agent-text',
+                id: 'answer',
+                localId: null,
+                createdAt: 2,
+                text: '완료했습니다.\ntoken=super-secret-value',
+            },
+            {
+                kind: 'agent-text',
+                id: 'old-answer',
+                localId: null,
+                createdAt: 1,
+                text: '예전 답변',
+            },
+        ];
+
+        expect(latestAgentResponse(messages)).toBe('완료했습니다.\ntoken=[가림]');
     });
 
     it('does not keep an archived session pinned', () => {
